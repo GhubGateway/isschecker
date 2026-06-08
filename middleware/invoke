@@ -1,0 +1,9 @@
+#!/bin/sh
+
+#
+# jupyter tool
+#
+/usr/bin/invoke_app "$@" -t isschecker \
+                         -C "start_jupyter -A -T @tool isschecker.ipynb" \
+                         -u anaconda-7 \
+                         -r none

@@ -1,0 +1,697 @@
+# Software ported from https://github.com/jbbarre/ISM_SimulationChecker
+
+import os
+# xarray needs netCDF4
+# Python wrapper for the netCDF version 4 library
+#import netCDF4
+#print ('netCDF4.__version__: ', netCDF4.__version__)
+import xarray as xr
+#print ('xr.__version__: ', xr.__version__)
+import pandas as pd
+#print ('pd.__version__: ', pd.__version__)
+import datetime
+import numpy as np
+#print ('np.__version__: ', np.__version__)
+import time
+#cftime: decoding time units and variable values in a netCDF file conforming to the Climate and Forecasting (CF) netCDF conventions.
+#import cftime
+# progress bar
+from tqdm import tqdm
+import subprocess
+import csv
+import copy
+
+
+# obtain the directory tree : return directories (=experiments) and files (=variables)
+def files_and_subdirectories(path):
+    files = []
+    directories = []
+    for f in os.listdir(path):
+        if os.path.isfile(os.path.join(path, f)):
+            files.append(f)
+        elif os.path.isdir(os.path.join(path, f)):
+            directories.append(f)
+    return directories, files
+
+# check motonocity of a list (used to check time serie) 
+
+def strictly_increasing(L):
+    return all(x<y for x, y in zip(L, L[1:]))
+
+
+def compliance_checker_ghub(experiment_criteria_filename, source_path):
+    
+    #start_time = time.time()
+
+    ###  Commit number:
+    # rlj: on Ghub, this is not the https://github.com/jbbarre/ISM_SimulationChecker commit number,
+    # this is the isschecker tool's commit number
+    try:
+        bashCommand = "git log --pretty=format:'%h' -n 1"
+        process = subprocess.Popen(bashCommand.split(), stdout=subprocess.PIPE)
+        commit_num, error = process.communicate()
+        commit_num = commit_num.decode("UTF-8")
+    except: 
+        print('Commit number associated with this code. Is there a .git in this directory ?')
+        commit_num = 'No commit number identified.'
+    
+    #######################################
+    #### specify your source path
+    #######################################
+    #rlj - input arg
+    #source_path = './test'
+    
+    #######################################
+    # Compliance values to be monitored
+    #######################################
+    workdir = os.getcwd()
+    
+    try:
+        # load csv :
+        ismip  = pd.read_csv(workdir + '/data/ismip6_criteria.csv',delimiter=';',decimal=",")
+    except IOError:
+        print('ERROR: Unable to open the compliance criteria file (.csv required with ; as delimiter and , for decimal.). Is the path to the file correct ? '+ workdir + 'ismip6_criteria_v0.csv')
+    else:
+        ismip_meta = ismip.to_dict('records')
+        # get the list of variables
+        ismip_var = [dic['variable'] for dic in ismip_meta]
+        # get the mandatory variables
+        ismip_mandatory_var = ismip['variable'][ismip.mandatory==1].tolist()
+    
+        variables = ismip_var
+        mandatory_variables = ismip_mandatory_var
+        #print ('mandatory_variables: ', mandatory_variables)
+    
+    filepath = '/data/%s' %experiment_criteria_filename
+    #print ('filepath: ', filepath)
+    #filepath = '/data/experiments_ismip6_ext.csv'
+    with open(workdir + filepath, 'r') as input_file:
+        '''
+        dict_reader = csv.DictReader(input_file)
+        for dictionary in dict_reader:
+            experiments_ismip6_ghub.append(dictionary)
+        '''
+        df = pd.read_csv(input_file)
+        # List of dictionary items
+        experiments_ismip6 = df.to_dict(orient='records')
+
+    #print ('type(experiments_ismip6): ', type(experiments_ismip6))
+    #print ('type(experiments_ismip6[0]): ', type(experiments_ismip6[0]))
+    #print ('experiments_ismip6: ', experiments_ismip6)
+
+    #print('check 2: ')
+    #for i in experiments_ismip6_ghub:
+        #if i not in experiments_ismip6_ghub_save:
+            #print ('i: ', i)
+    #print ('check 2 done.')
+
+    ####### Set up the correct setup according your Experiment: experiments_ismip6_ext for ISMIP6 extension (2300) OR experiments_ismip6 for ISMIP6 (2100)
+    #experiments = experiments_ismip6
+    # rlj:
+    experiments = experiments_ismip6
+    
+    ###############################################
+    # create the compliance_checker_log.txt file
+    ###############################################
+    
+    # stop the checker if Typeerror occurs.
+    try:
+        compliance_checker_log = os.path.join(source_path,'compliance_checker_log.txt')
+        if os.path.exists(compliance_checker_log):
+            os.remove(compliance_checker_log)
+        with open(compliance_checker_log,"w") as f:
+            print('-> Checking '+ source_path)
+            print( )
+            experiment_directories,files = files_and_subdirectories(source_path)
+            today = datetime.date.today()
+    
+            f.write(' \n')
+            f.write('************************************************************************************\n')
+            f.write('*************     Ice Sheet Model Simulations - Compliance Checker     *************\n')
+            f.write('************************************************************************************\n')
+            #f.write(f'Ghub Commit Number: {commit_num} \n')
+            f.write(' \n')
+            f.write('verification criteria: %s \n' %experiment_criteria_filename)
+            f.write('date: '+ today.strftime("%Y/%m/%d") +'\n')
+            #f.write('source: https://github.com/jbbarre/ISM_SimulationChecker \n')
+            f.write(' \n')
+            f.write('------------------------------------------------------------------------------------\n')
+            f.write('Verified directory: '+ source_path +' \n')
+            f.write('------------------------------------------------------------------------------------\n')
+            f.write(' \n')
+            f.write(' \n')
+            f.write(' \n')
+            f.write(' \n')
+            f.write('====================================================================================\n')
+            f.write('================                DETAILED RESULTS                    ================\n')
+            f.write('====================================================================================\n')
+            f.write('Tips: Use Cltr+F to look for specific problems. \n')
+            f.write(' \n')
+    
+            ###############################################
+            # Start the compliance checker
+            ###############################################
+    
+            # total number of errors for the entire compliance check. 
+            total_errors = 0
+            # total number of warnings for the entire compliance check. 
+            total_warnings = 0
+            # total number of errors related to naming tests for the entire compliance check.
+            total_naming_errors = 0
+            # total number of errors related to numerical tests for the entire compliance check.
+            total_num_errors = 0
+            # total number of errors related to spatial tests for the entire compliance check.
+            total_spatial_errors = 0
+            # total number of errors related to time tests for the entire compliance check.
+            total_time_errors = 0
+            # total number of errors related to missing mandatory files (= mandatory variables).
+            total_file_errors = 0 
+    
+            # gather all the naming issues to report in the synthesis.
+            report_naming_issues =[]
+    
+            #initialize  files checked counter
+            file_counter = 0
+            #initialize  files checked counter
+            exp_counter = 0
+            for xp in experiment_directories:
+                
+                exp_counter += 1
+    
+                exp_dir,exp_files = files_and_subdirectories(os.path.join(source_path, xp))
+                exp_files=list(filter(lambda file: file.split('.')[-1] == 'nc', exp_files))
+                print ('exp_files: ', str(exp_files))
+                
+                # total number of errors for the experiment.
+                exp_errors = 0
+                # total number of errors related to naming tests of the experiment.
+                exp_naming_errors = 0
+                # total number of errors related to numerical tests of the experiment.
+                exp_num_errors = 0
+                # total number of errors related to spatial tests of the experiment.
+                exp_spatial_errors = 0
+                # total number of errors related to time tests of the experiment.
+                exp_time_errors = 0
+                # total number of errors related to files(=variables) in the experiment.
+                exp_file_errors = 0
+                # rlj:
+                # On Ghub, only one file from an experiment directory is uploaded.
+                exp_file_warnings = 0
+                # total number of warnings for the experiment.
+                exp_warnings = 0
+                # total number of warnings related to naming tests of the experiment.
+                exp_naming_warnings = 0
+                # total number of warnings related to numerical tests of the experiment.
+                exp_num_warnings = 0
+                # total number of warnings related to spatial tests of the experiment.
+                exp_spatial_warnings = 0
+                # total number of warnings related to time tests of the experiment.
+                exp_time_warnings = 0
+    
+                # create the list of missing mandatory variables - List could be empty - 
+                # rlj: moved setting temp_mandatory_var outside the for loop.
+                # rlj: copy list by value not reference
+                #temp_mandatory_var = mandatory_variables
+                temp_mandatory_var = mandatory_variables[:]
+                for i in exp_files:
+                    file_name_split = i.split('_')
+                    variable = file_name_split[0]
+                    if  variable in mandatory_variables:
+                        temp_mandatory_var.remove(variable)
+                #print ('mandatory_variables', mandatory_variables)
+                #print ('temp_mandatory_var', temp_mandatory_var)
+                #split the experiment directory name
+                
+                # rlj: on Ghub, only one file from an experiment directory is uploaded so
+                # we do not know the grid resolution of the experiment directory.
+                '''
+                experiment_chain = xp.split('_')
+                print ('experiment_chain: ', experiment_chain)
+                if len(experiment_chain) == 2 :
+                    #get the experiment name (example: exp05)
+                    experiment_name = '_'.join(experiment_chain[:-1])
+                    #get the resolution as integer
+                    grid_resolution = int(experiment_chain[-1])
+                else:
+                    experiment_name = xp
+                    grid_resolution = 0
+                    print('Error in the naming of the experiment ',xp,'. Should be similar to expXXX_RES')
+                '''
+                grid_resolution = 0
+                experiment_name = xp
+                #print ("[dic['experiment'] for dic in experiments]: ", [dic['experiment'] for dic in experiments])
+                if experiment_name  in [dic['experiment'] for dic in experiments]:
+                    
+                    f.write('**********************************************************\n')
+                    f.write('** Experiment: ' + experiment_name + '\n')
+                    f.write('**********************************************************\n')
+                    f.write('\n ')
+                    if not temp_mandatory_var:
+                        f.write('Mandatory variables Test: ' + xp + ' : all mandatory variables exist. \n')
+                    else:
+                        # rlj: on Ghub, only one file from an experiment directory is uploaded.
+                        #f.write('ERROR: In experiment ' +  xp +', these mandatory variable(s) is (are) missing: '+ str(temp_mandatory_var)+'\n')
+                        #exp_file_errors += len(temp_mandatory_var)
+                        if temp_mandatory_var == mandatory_variables:
+                            f.write('ERROR: In experiment ' +  xp + ', all mandatory variables are missing: '+ str(mandatory_variables)+'\n')
+                            exp_file_errors += 1
+                        #else:
+                            #if.write('WARNING: In experiment ' +  xp + ', these mandatory variable(s) is (are) missing: '+ str(temp_mandatory_var)+'\n')
+                            #exp_file_warnings += len(temp_mandatory_var)
+    
+                    #for file in tqdm(exp_files):
+                    for file in exp_files:
+    
+                        file_counter += 1
+    
+                        # total number of errors for the variable.
+                        var_errors = 0
+                        # total number of warnings for the variable.
+                        var_warnings = 0
+                        # total number of errors related to the naming tests of the variable.
+                        var_naming_errors = 0
+                        # total number of errors related to the numerical tests of the variable.
+                        var_num_errors = 0
+                        # total number of errors related to the spatial tests of the variable.
+                        var_spatial_errors = 0
+                        # total number of errors related to the time tests of the variable.
+                        var_time_errors = 0
+                        # total number of warnings for the variable.
+                        var_warnings = 0
+                        # total number of warnings for the variable.
+                        var_warnings = 0
+                        # total number of warnings related to the naming tests of the variable.
+                        var_naming_warnings = 0
+                        # total number of warnings related to the numerical tests of the variable.
+                        var_num_warnings = 0
+                        # total number of warnings related to the spatial tests of the variable.
+                        var_spatial_warnings = 0
+                        # total number of warnings related to the time tests of the variable.
+                        var_time_warnings = 0
+    
+                        split_path=os.path.normpath(file).split(os.sep)
+                        file_name = split_path[-1]
+                        file_name_split = file_name.split('_')
+                        #print ('\nlen(file_name_split): ', len(file_name_split))
+                        #print ('file_name_split: ', file_name_split)
+                       
+                        considered_variable = file_name_split[0]
+                        region = file_name_split[1]
+                        #print ('region: ', region)
+                        #group  = file_name_split[2]
+                        #print ('group: ', group)
+                        #model = file_name_split[3]
+                        #print ('model: ', model)
+                        file_extention = file_name_split[len(file_name_split)-1][-2:]
+                        #print ('file_extention: ', file_extention)
+                        
+                        # Load the netcdf file.
+                        # By default, xarray decodes the time values and in this case,
+                        # the units and calendar attributes are consumed into the returned time values
+                        ds = xr.open_dataset(os.path.join(source_path,xp,file), decode_times=False)
+                        #print ("ds['time'].attrs: ", ds['time'].attrs)
+                        units = ds['time'].attrs['units']
+                        #print ('units: ', units)
+                        calendar = ds['time'].attrs['calendar']
+                        #print ('calendar: ', calendar)
+                        
+                        ds = xr.open_dataset(os.path.join(source_path,xp,file))
+                        #print ('list(ds.keys()): ', list(ds.keys()))
+                        # Load local variables included in the netcdf file
+                        file_variables = list(ds.data_vars)
+                        #print ('file_variables: ', str(file_variables))
+
+                        # test file extention
+    
+                        if file_extention != 'nc':
+                            f.write(' !! ' + file_name + ' is not a NETCDF file. The compliance check is ignored.'+'\n')
+                            #f.write (' \n')
+                            
+                        else: 
+                            # test if the structure of the file name is correct
+                            #if int(len(file_name_split)) == 5:
+                            # rlj allow for modeling groups names with _'s
+                            # rlj allow for ctrl_proj_open, ctrl_proj_std, hist_open and hist_std
+                            #print ('len(file_name_split): ', len(file_name_split))
+                            if int(len(file_name_split)) >= 5 and int(len(file_name_split)) <= 9:
+ 
+                                # NAMING TEST
+                                # test if experiment name (host directory) and exp in variable file name are the same.
+                                                # name of the experiment in the file name.
+                                # rlj: on Ghub, the experiment varname is derived from the experiment name in the Jupyter Notebook
+                                #experiment_varname = file_name_split[4][:-3]
+                                experiment_varname = ''
+                                if (1): #experiment_varname == experiment_name:
+                                    # test IF the file is not a scalar variable then run check ELSE check next variable
+                                    #rlj
+                                    #if considered_variable in variables:
+                                    if considered_variable in mandatory_variables:
+                                        f.write (' \n')
+                                        f.write('Experiment: '+ experiment_name + ' - File: ' + file_name + '\n')
+                                        f.write(' \n')
+                                        
+                                        # TEST data dimensions: x,y,t ok?
+                                        #print ('list(ds.coords): ', list(ds.coords))
+                                        header_ds = ds.to_dict(data=False)
+                                        dim = set(list(header_ds['coords'].keys()))
+                                        #print ('dim: ', dim)
+    
+                                        #perform compliance even is time is missing. check on time is managed below
+                                        if set(['x','y']).issubset(dim):
+                                            # NAMING TEST
+                                            if region.upper() in ['AIS', 'GIS']:
+                                                #f.write('Studied Region: ' + region + '\n')
+                                                if region == 'AIS':
+                                                    # AIS Grid
+                                                    grid_extent = [-3040000,-3040000,3040000,3040000]
+                                                    possible_resolution = [1,2,4,8,16,32] 
+                                                else: 
+                                                    # GIS Grid
+                                                    grid_extent = [-720000,-3450000,960000,-570000]
+                                                    possible_resolution = [1,2,4,5,10,20]
+    
+    
+                                                for ivar in file_variables:
+                                                    if ivar in ismip_var:
+                                                        f.write('** Tested Variable: '+ ivar +'\n')
+                                                        f.write (' \n')
+                                                        # get index in the ismip_var list
+                                                        var_index = [k for k in range(len(ismip_var)) if ismip_var[k]==ivar]
+                                                        
+                                                    # NUMERICAL TESTS
+                                                        f.write('NUMERICAL Tests \n')
+                                                        # check the unit
+                                                        if ds[ivar].attrs['units'] == ismip_meta[var_index[0]]['units']:
+                                                            f.write(' - The unit is correct: ' + ds[ivar].attrs['units']+'\n')
+                                                        else:
+                                                            f.write(' - ERROR: The unit of the variable is ' + ds[ivar].attrs['units'] + ' and should be ' + ismip_meta[var_index[0]]['units']+' \n')
+                                                            var_num_errors += 1 
+    
+                                                        # check if the array  is full of NAN values
+                                                        if False in ds[ivar].isnull():
+                                                            # check the min value
+                                                            if ds[ivar].min(skipna=True).item()>=ismip_meta[var_index[0]]['min_value_'+region.lower()]:
+                                                                f.write(' - The minimum value successfully verified.\n')
+                                                            else:
+                                                                f.write(' - ERROR: The minimum value (' + str(ds[ivar].min(skipna=True).values.item(0)) + ') is out of range. Min value accepted: ' + str(ismip_meta[var_index[0]]['min_value_'+region.lower()])+'\n')
+                                                                var_num_errors += 1 
+                                                            # check the max value
+                                                            if ds[ivar].max(skipna=True).item()<=ismip_meta[var_index[0]]['max_value_'+region.lower()]:
+                                                                    f.write(' - The maximum value successfully verified.\n')
+                                                            else:
+                                                                f.write(' - ERROR: The maximum value (' + str(ds[ivar].max(skipna=True).values.item(0)) + ') is out of range. Max value accepted: ' + str(ismip_meta[var_index[0]]['max_value_'+region.lower()])+'\n')
+                                                                var_num_errors += 1
+                                                        else:
+                                                            f.write(' - ERROR: The array only contains Nan values.\n')
+                                                            var_num_errors += 1
+    
+    
+                                                    # SPATIAL TESTS
+                                                        # SPATIAL:Check spatial extent of the grid
+                                                        f.write('SPATIAL Tests \n')
+                                                        # get the grid from the file
+                                                        coords = ds.coords.to_dataset()
+                                                        Xbottomleft=int(min(coords['x']).values.item())
+                                                        Ybottomleft=int(min(coords['y']).values.item())
+                                                        Xtopright=int(max(coords['x']).values.item())
+                                                        Ytopright=int(max(coords['y']).values.item())
+    
+                                                        if Xbottomleft == grid_extent[0] & Ybottomleft == grid_extent[1]:
+                                                            f.write(' - Grid: Lowest left corner is well defined.\n')
+                                                        else:    
+                                                            f.write(' - ERROR: Lowest left corner of the grid [' + str(Xbottomleft) + ',' + str(Ybottomleft) + '] is not correctly defined. [' + str(grid_extent[0])+ ',' + str(grid_extent[1]) + '] Expected\n')
+                                                            var_spatial_errors += 1
+                                                        if Xtopright == grid_extent[2] & Ytopright == grid_extent[3]:
+                                                            f.write(' - Grid: Upper right corner is well defined.\n')
+                                                        else:    
+                                                            f.write(' - ERROR: Upper rigth corner of the grid [' + str(Xtopright) + ',' + str(Ytopright) + '] is not correctly defined. [' + str(grid_extent[0]) + ',' + str(grid_extent[1])+ '] Expected\n')
+                                                            var_spatial_errors += 1
+    
+                                                        #SPATIAL:check the spatial resolution
+                                                        Xresolution = round((coords['x'][1].values-coords['x'][0].values)/1000,0)
+                                                        Yresolution = round((coords['y'][1].values-coords['y'][0].values)/1000,0)
+                                                        if Xresolution in set(possible_resolution) and Yresolution in set(possible_resolution):
+                                                            # rlj: on Ghub, only one file from an experiment directory is uploaded so
+                                                            # we do not know the grid resolution of the experiment directory
+                                                            '''
+                                                            if Xresolution == grid_resolution and Yresolution == grid_resolution:
+                                                                f.write(' - The grid resolution (' + str(Xresolution) + ') was successfully verified.\n')
+                                                            else:
+                                                                f.write(' - ERROR: The grid resolution ( ' + str(Xresolution) + ' or ' + str(Yresolution) + ') is different of ' + str(grid_resolution) + ' declared in the file name.\n')
+                                                                var_spatial_errors += 1
+                                                            '''
+                                                            f.write(' - The grid resolution (' + str(Xresolution) + ') was successfully verified.\n')
+                                                        else:
+                                                            f.write(' - Error: x: ' + str(Xresolution) + ',y: ' + str(Yresolution) + ' is not an authorized grid resolution.\n')
+                                                            var_spatial_errors += 1
+    
+                                                    # TIME TESTS
+                                                        f.write('TIME Tests \n')
+                                                        #check if time dimension is not missing
+                                                        if set(['t']).issubset(dim) or set(['time']).issubset(dim):
+                                                            iteration = len(ds.coords['time'])
+                                                            ###rlj
+                                                            print ('iteration: ', iteration)
+                                                            mintime = min(ds['time']).values
+                                                            print ('\ntype(mintime): ', type(mintime))
+                                                            print ('mintime: ', mintime)
+                                                            print ('mintime: ', mintime.astype("datetime64[D]"))
+                                                            maxtime = max(ds['time']).values
+                                                            print ('type(maxtime): ', type(maxtime))
+                                                            print ('maxtime: ', maxtime)
+                                                            print ('maxtime: ', maxtime.astype("datetime64[D]"))
+                                                            #mintime = min(nc_dataset.variables['time'][:])
+                                                            #print ('type(mintime): ', type(mintime))
+                                                            #print ('mintime: ', mintime)
+                                                            #print ('mintime: ', mintime.astype("datetime64[D]"))
+
+                                                            start_exp = min(ds['time']).values.astype("datetime64[D]")
+                                                            end_exp  = max(ds['time']).values.astype("datetime64[D]")
+                                                            avgyear = 365 # pedants definition of a year length with leap years
+                                                            # rlj
+                                                            calendar_split = calendar.split('_')
+                                                            if len(calendar_split) == 2 and calendar_split[1] == 'day':
+                                                               avgyear = int(calendar_split[0])
+                                                            print ('avgyear: ', avgyear)
+                                                            duration_days = (end_exp - start_exp)
+                                                            duration_years =  duration_days.astype('timedelta64[Y]')/np.timedelta64(1,'Y')
+                                                        
+                                                            index_exp=[dic['experiment'] for dic in experiments].index(experiment_name)
+                                                            #print ('index_exp: ', index_exp)
+
+                                                            #test if start_exp and end_exp are datetime format
+                                                            if np.issubdtype(start_exp.dtype, np.datetime64) & np.issubdtype(start_exp.dtype, np.datetime64):
+    
+                                                                #check Monotonicity of the time serie
+                                                                if strictly_increasing(ds.coords['time']):
+                                                                    # test Time step : should be 360<timestep<367
+                                                                    if isinstance((ds['time'].values[1]-ds['time'].values[0]),datetime.timedelta):
+                                                                        time_step = (ds['time'].values[1]-ds['time'].values[0]).days
+                                                                    else:   
+                                                                        if isinstance((ds['time'].values[1]-ds['time'].values[0]),np.timedelta64):
+                                                                            time_step = np.timedelta64(ds['time'].values[1]-ds['time'].values[0], 'D')/ np.timedelta64(1, 'D')
+                                                                        else:
+                                                                            # rlj: mod to correct time_step calculation
+                                                                            # time_step = ds['time'].values[1]-ds['time'].values[10]
+                                                                            time_step = ds['time'].values[1]-ds['time'].values[0]
+    
+                                                                    if 360<=time_step<=367:
+                                                                        f.write(' - Time step: ' + str(time_step) + ' days' + '\n')
+                                                                    else:
+                                                                        f.write(' - ERROR: the time step(' + str(time_step) + ') should be comprised between [360,367].\n')
+                                                                        var_time_errors += 1
+    
+                                                                    # test duration  (iteration = length of the coords 'time')
+                                                                    duration_days = pd.to_timedelta(time_step * iteration,'D')
+                                                                    #print (pd.to_numeric(duration_days.days / avgyear))
+                                                                    duration_years = round(pd.to_numeric(duration_days.days / avgyear))
+                                                                    
+                                                                    if duration_years == experiments[index_exp]['duration'] or \
+                                                                        experiment_name.startswith('hist') and 0.0 <= duration_years <= 160.0:
+                                                                            
+                                                                        f.write(" - Experiment lasts " + str(duration_years) + ' years.\n')
+                                                                        # test Starting date
+                                                                        dateformat_start_exp = datetime.datetime(start_exp.item().year, start_exp.item().month, start_exp.item().day)
+                                                                        print ('dateformat_start_exp: ', dateformat_start_exp)
+                                                                        print (experiments[index_exp]['startinf'])
+                                                                        print (experiments[index_exp]['startsup'])
+                                                                        startinf = datetime.datetime.strptime(experiments[index_exp]['startinf'], '%Y-%m-%d %H:%M:%S')
+                                                                        startsup = datetime.datetime.strptime(experiments[index_exp]['startsup'], '%Y-%m-%d %H:%M:%S')
+                                                                        #'''
+                                                                        #if datetime.datetime(experiments[index_exp]['startinf']) <=  dateformat_start_exp <= datetime.datetime(experiments[index_exp]['startsup']):
+                                                                        if startinf <=  dateformat_start_exp <= startsup:
+                                                                            f.write(' - Experiment starts correctly on ' + start_exp.item().strftime('%Y-%m-%d') + '.\n')
+                                                                        else:
+                                                                            #f.write(' - ERROR: the experiment starts the ' + start_exp.item().strftime('%Y-%m-%d') + '. The date should be comprised between ' + experiments[index_exp]['startinf'].strftime('%Y-%m-%d') + ' and ' + experiments[index_exp]['startsup'].strftime('%Y-%m-%d')+'\n')
+                                                                            f.write(' - ERROR: the experiment starts on ' + start_exp.item().strftime('%Y-%m-%d') + '. The date should be comprised between ' + str(startinf) + ' and ' + str(startsup) +'\n')
+                                                                            var_time_errors += 1
+                                                                        #'''
+                                                                        # test Ending date
+                                                                        dateformat_end_exp = datetime.datetime(end_exp.item().year, end_exp.item().month, end_exp.item().day)
+                                                                        print ('dateformat_end_exp: ', dateformat_end_exp)
+                                                                        endinf = datetime.datetime.strptime(experiments[index_exp]['endinf'], '%Y-%m-%d %H:%M:%S')
+                                                                        endsup = datetime.datetime.strptime(experiments[index_exp]['endsup'], '%Y-%m-%d %H:%M:%S')
+                                                                        #'''
+                                                                        if endinf <= dateformat_end_exp <= endsup:
+                                                                            f.write(' - Experiment ends correctly on ' + end_exp.item().strftime('%Y-%m-%d') + '.\n')
+                                                                        else:
+                                                                            f.write(' - ERROR: the experiment ends on ' + end_exp.item().strftime('%Y-%m-%d') + '. The date should be comprised between ' + str(endinf) + ' and ' + str(endsup) +'\n')
+                                                                            var_time_errors += 1
+                                                                        #'''
+                                                                    else:
+                                                                        # rlj: mod to prevent exception
+                                                                        #end_date = start_exp  + np.timedelta64(experiments[2]['duration']*365,'D')
+                                                                        #end_date = start_exp  + np.timedelta64(experiments[index_exp]['duration']*365,'D')
+                                                                        end_date = start_exp  + np.timedelta64(experiments[index_exp]['duration']*avgyear,'D')
+                                                                        f.write(' - ERROR: the experiment lasts ' + str(duration_years) + ' years. The duration should be ' + str(experiments[index_exp]['duration']) + ' years\n')
+                                                                        f.write(' - As the experiment started on ' + start_exp.item().strftime('%Y-%m-%d') + ' , it should end on '+ end_date.item().strftime('%Y-%m-%d')+'\n')                                                                 
+                                                                        var_time_errors += 1
+    
+                                                                else: #time serie not monotonous
+                                                                    f.write(' - ERROR: the time serie is not monotonous. Time segments have probably been concatenate in a wrong order.\n')
+                                                                    var_time_errors += 1
+                                                                
+                                                            else: 
+                                                                #not a datetime format
+                                                                f.write(' - ERROR: the time format of the Netcdf file is not recognized.Time Tests have been ignored.\n')
+                                                                var_time_errors += 1
+                                                        else: #Time dimension is missing
+                                                            f.write(' - ERROR: The time dimensions is missing. Time Tests have been ignored.\n')
+                                                            var_time_errors += 1
+    
+                                            else:
+                                                # NAMING TEST
+                                                f.write('- ERROR: Region ' + region + ' not recognized. It should be AIS or GIS. The compliance check has been interrupted for this variable.\n')
+                                                report_naming_issues.append('Compliance check ignored: region (AIS/GIS) not identified in the file ' + file_name + ' due to wrong naming.')
+                                                var_naming_errors += 1
+                                        else:
+                                            ## TEST data dimensions: x or y is missing
+                                            f.write('- ERROR: Compliance check ignored: x or y in the mandatory dimensions (x,y,t) is missing.\n')
+                                            f.write('                                   Only ' + str(list(header_ds['coords'].keys())) + ' has been detected.\n')
+                                            report_naming_issues.append('Compliance check ignored: x or y in the mandatory dimensions (x,y,t) is missing in ' + file_name )
+                                            var_naming_errors += 1
+    
+                                        var_errors = var_errors + var_naming_errors + var_num_errors + var_spatial_errors + var_time_errors
+                                        var_warnings = var_warnings + var_num_warnings + var_spatial_warnings + var_time_warnings
+                                        
+                                        f.write('\n')        
+                                        f.write('----------------------------------------------------------\n')
+                                        f.write(experiment_name + ' - ' + considered_variable + ' - File:' + file_name+'\n')
+                                        if var_errors > 0:
+                                            f.write(str(var_errors) + ' error(s). Please review before sharing.'+'\n')
+                                        else:
+                                            f.write('No errors. Good job !'+'\n')
+                                        if var_warnings > 0:
+                                            f.write(str(var_warnings) + ' warning(s). Please review before sharing.'+'\n')
+                                        else:
+                                            f.write('No warnings.'+'\n')
+                                        f.write('----------------------------------------------------------\n')
+                                else:
+                                    # NAMING TEST
+                                    f.write(' - ERROR: in the file name ' + file_name + ', the experiment name ('+experiment_varname+') do not match the directory name: ' + experiment_name + '.\n')
+                                    report_naming_issues.append('Compliance check ignored: in the file name ' + file_name + ', the experiment name (' + experiment_varname + ') do not match the directory name: ' + experiment_name + '.\n')
+                                    var_naming_errors += 1
+    
+                                    var_errors = var_errors + var_naming_errors + var_num_errors + var_spatial_errors + var_time_errors
+                                    var_warnings = var_warnings + var_num_warnings + var_spatial_warnings + var_time_warnings
+    
+                            else: 
+                                # NAMING TEST
+                                f.write(' - ERROR: the file name ' + file_name + ' do not follow the naming convention.\n')
+                                report_naming_issues.append('Compliance check ignored: file ' + file_name + ' do not follow the naming convention.')
+                                var_naming_errors += 1
+    
+                                var_errors = var_errors + var_naming_errors + var_num_errors + var_spatial_errors + var_time_errors
+                                var_warnings = var_warnings + var_num_warnings + var_spatial_warnings + var_time_warnings
+    
+                        exp_naming_errors = exp_naming_errors + var_naming_errors
+                        exp_num_errors = exp_num_errors + var_num_errors
+                        exp_spatial_errors = exp_spatial_errors + var_spatial_errors
+                        exp_time_errors = exp_time_errors + var_time_errors   
+                        exp_errors = exp_time_errors + exp_spatial_errors + exp_num_errors + exp_naming_errors+exp_file_errors
+                        exp_num_warnings = exp_num_warnings + var_num_warnings
+                        exp_spatial_warnings = exp_spatial_warnings + var_spatial_warnings
+                        exp_time_warnings = exp_time_warnings + var_time_warnings
+                        
+                        # rlj: mod to prevent NFS exception on shutil.rmtree
+                        ds.close()
+   
+                else:
+                    
+                    f.write('\n ')
+                    f.write('**********************************************************\n')
+                    f.write(' **  Experiment: ' + experiment_name + ' \n ')
+                    f.write('**********************************************************\n')
+                    f.write('\n ')
+                    #f.write('ERROR: The compliance check is ignored for experiment ' + experiment_name + ' as it is not in ' + [exp['experiment'] for exp in experiments] +'. \n')
+                    # rlj: mod to prevent exception
+                    f.write('ERROR: The compliance check is ignored for experiment ' + experiment_name + ' as it is not in ' + str([exp['experiment'] for exp in experiments]) +'. \n')
+                    exp_naming_errors +=1
+                    exp_errors = exp_time_errors + exp_spatial_errors + exp_num_errors + exp_naming_errors + exp_file_errors
+                    report_naming_issues.append('Compliance check ignored : experiment ' + experiment_name + ' not in the experiments list.')
+            
+                print(experiment_name,': compliance check processed.')
+                if exp_errors >0:
+                    print('Found' , exp_errors , 'errors. Check compliance_checker_log.txt for details.')
+                else:
+                    print('Successfully verified with no errors')
+                print( )
+    
+                # Update counters.
+                total_naming_errors += exp_naming_errors
+                total_num_errors += exp_num_errors
+                total_spatial_errors += exp_spatial_errors
+                total_time_errors += exp_time_errors
+                total_file_errors += exp_file_errors          
+    
+            total_errors = total_naming_errors + total_num_errors + total_spatial_errors + total_time_errors + total_file_errors
+            #feedback terminal
+            print('-------------------------------------------------------------------------')
+            print(source_path,': compliance check processed.')
+            if total_errors >0:
+                print('Found a total of' , total_errors , 'errors. Check compliance_checker_log.txt for details.')
+            else:
+                print('Successfully verified with no errors')
+            print('-------------------------------------------------------------------------')
+                
+    
+        ###################################################        
+        # insert synthesis at the top of the log file
+        ###################################################
+    
+        with open(os.path.join(source_path,'compliance_checker_log.txt'), "r") as f:
+            contents = f.readlines()
+        # lines insert position
+        iline =  11
+        contents.insert(iline, str(exp_counter) + ' experiments checked.\n')
+        iline += 1
+        contents.insert(iline, str(file_counter) + ' files checked (Scalar files are ignored).\n')
+        iline += 2
+        contents.insert(iline, str(total_errors) + ' error(s) detected.\n')
+        iline += 1
+        contents.insert(iline, '  - Mandatory variables: ' + str(total_file_errors) + ' error(s)\n')
+        iline += 1 
+        contents.insert(iline, '  - Naming Tests       : ' + str(total_naming_errors) + ' error(s)\n')
+        iline += 1
+        contents.insert(iline, '  - Numerical Tests    : ' + str(total_num_errors) + ' error(s)\n')
+        iline += 1 
+        contents.insert(iline, '  - Spatial Tests      : ' + str(total_spatial_errors) + ' error(s)\n')
+        iline += 1
+        contents.insert(iline, '  - Time Tests         : ' + str(total_time_errors) + ' error(s)\n')
+        iline += 2
+        contents.insert(iline, str(total_warnings) + ' warning(s) detected.\n')
+        iline += 2
+        if total_naming_errors > 0 :
+            contents.insert(iline, 'Naming tests errors report: \n' )
+            iline += 1
+            for i in range(iline,len(report_naming_issues)):
+                contents.insert(i, '  - ' + report_naming_issues[i-24] + '\n')
+            contents.insert(iline+len(report_naming_issues), '\n')
+    
+        with open(os.path.join(source_path,'compliance_checker_log.txt'), "w") as f:
+            f.writelines(contents)
+            
+        #print ('Elapsed time: ' + str(np.round(((time.time() - start_time)/60.0),2)) + ' minutes')
+    
+    except TypeError as err:
+        print('Something went wrong with your dataset. Please, check your file(s) carefully. Error  :', err)
